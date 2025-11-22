@@ -12,7 +12,13 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json({ limit: '10mb' }));
 
-const PORT = process.env.PORT || 8080;
+// Middleware para loggear todas las peticiones
+app.use((req, res, next) => {
+  console.log(`[Backend Request] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
+const PORT = process.env.PORT || 8081;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -44,20 +50,26 @@ if (serviceAccount) {
 
 // Middleware para verificar Firebase ID token
 async function verifyToken(req, res, next) {
+  console.log('[verifyToken] Checking token...');
   if (process.env.SKIP_AUTH === 'true') {
     // modo desarrollo: setea un uid de prueba
     req.user = { uid: process.env.DEV_UID || 'dev-uid', email: 'dev@example.com' };
+    console.log(`[verifyToken] SKIP_AUTH enabled. Using dev user: ${req.user.uid}`);
     return next();
   }
   const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'No token' });
+  if (!auth || !auth.startsWith('Bearer ')) {
+    console.error('[verifyToken] No token or invalid format.');
+    return res.status(401).json({ error: 'No token' });
+  }
   const idToken = auth.split(' ')[1];
   try {
     const decoded = await admin.auth().verifyIdToken(idToken);
     req.user = decoded; // tiene uid, email...
+    console.log(`[verifyToken] Token valid for user: ${decoded.uid}`);
     next();
   } catch (err) {
-    console.error('Token inválido', err);
+    console.error('[verifyToken] Token invalid:', err);
     res.status(401).json({ error: 'Token inválido' });
   }
 }
@@ -70,6 +82,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 // registerUser - upsert user by firebase_uid
 app.post('/api/registerUser', verifyToken, async (req, res) => {
   const uid = req.user.uid;
+  console.log(`[registerUser] Processing request for Firebase UID: ${uid}`);
   const email = req.user.email || req.body.email;
   const displayName = req.user.name || req.body.displayName || null;
   try {
@@ -78,24 +91,73 @@ app.post('/api/registerUser', verifyToken, async (req, res) => {
       .upsert({ firebase_uid: uid, email, display_name: displayName }, { onConflict: 'firebase_uid' })
       .select().single();
     if (error) throw error;
+    console.log(`[registerUser] User ${uid} synced successfully.`);
     res.json({ ok: true, user: data });
   } catch (e) {
-    console.error(e);
+    console.error('[registerUser] Error syncing user:', e);
     res.status(500).json({ error: e.message || e });
   }
 });
 
 // create vehicle
 app.post('/api/vehicles', verifyToken, async (req, res) => {
-  const uid = req.user.uid;
-  const { make, model, year, license_plate } = req.body;
+  const firebaseUid = req.user.uid;
+  const { make, model, year, license_plate, nickname } = req.body;
   try {
+    // Primero, obtenemos el id interno del usuario a partir de su firebase_uid
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('firebase_uid', firebaseUid)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({ error: 'Usuario no encontrado en la base de datos.' });
+    }
+
     const { data, error } = await supabase
       .from('vehicles')
-      .insert({ firebase_uid: uid, make, model, year, license_plate })
+      .insert({ 
+        user_id: user.id, // Usamos el id interno (UUID)
+        make, 
+        model, 
+        year, 
+        license_plate,
+        nickname
+      })
       .select().single();
+
     if (error) throw error;
     res.json({ ok: true, vehicle: data });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || e });
+  }
+});
+
+// get vehicles for user
+app.get('/api/vehicles', verifyToken, async (req, res) => {
+  const firebaseUid = req.user.uid;
+  try {
+    // Primero, obtenemos el id interno del usuario a partir de su firebase_uid
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('firebase_uid', firebaseUid)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({ error: 'Usuario no encontrado en la base de datos.' });
+    }
+
+    // Obtenemos todos los vehículos para ese user_id
+    const { data, error } = await supabase
+      .from('vehicles')
+      .select('*')
+      .eq('user_id', user.id);
+
+    if (error) throw error;
+    res.json({ ok: true, vehicles: data });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || e });
@@ -138,9 +200,8 @@ app.post('/api/vehicles/:vehicleId/documents', verifyToken, upload.single('file'
     if (up.error) throw up.error;
 
     // obtener publicUrl (si bucket es público)
-    const { data: urlData, error: urlErr } = await supabase.storage.from('vehicle-docs').getPublicUrl(path);
-    if (urlErr) console.warn('No se obtuvo publicUrl', urlErr);
-
+    const { data: urlData } = supabase.storage.from('vehicle-docs').getPublicUrl(path);
+    
     const publicUrl = urlData?.publicUrl || null;
 
     // insertar registro en documents
@@ -150,7 +211,8 @@ app.post('/api/vehicles/:vehicleId/documents', verifyToken, upload.single('file'
         vehicle_id: vehicleId,
         document_type: documentType,
         expiry_date: expiryDate,
-        storage_path: publicUrl
+        storage_path: path, // Guardamos el path para poder generar URLs firmadas en el futuro si es necesario
+        public_url: publicUrl
       })
       .select().single();
     if (error) throw error;
@@ -164,14 +226,30 @@ app.post('/api/vehicles/:vehicleId/documents', verifyToken, upload.single('file'
 
 // register device token
 app.post('/api/registerDevice', verifyToken, async (req, res) => {
-  const uid = req.user.uid;
+  const firebaseUid = req.user.uid;
   const { token, platform } = req.body;
   if (!token) return res.status(400).json({ error: 'token required' });
   try {
+    // Primero, obtenemos el id interno del usuario a partir de su firebase_uid
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('firebase_uid', firebaseUid)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({ error: 'Usuario no encontrado en la base de datos.' });
+    }
+
     const { data, error } = await supabase
       .from('devices')
-      .upsert({ firebase_uid: uid, token, platform }, { onConflict: 'token' })
+      .upsert({ 
+        user_id: user.id, // Usamos el id interno (UUID)
+        token, 
+        platform 
+      }, { onConflict: 'token' })
       .select().single();
+      
     if (error) throw error;
     res.json({ ok: true, device: data });
   } catch (e) {

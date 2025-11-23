@@ -258,6 +258,181 @@ app.post('/api/registerDevice', verifyToken, async (req, res) => {
   }
 });
 
+// register device token
+app.post('/api/registerDevice', verifyToken, async (req, res) => {
+  const firebaseUid = req.user.uid;
+  const { token, platform } = req.body;
+  if (!token) return res.status(400).json({ error: 'token required' });
+  try {
+    // Primero, obtenemos el id interno del usuario a partir de su firebase_uid
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('firebase_uid', firebaseUid)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({ error: 'Usuario no encontrado en la base de datos.' });
+    }
+
+    const { data, error } = await supabase
+      .from('devices')
+      .upsert({ 
+        user_id: user.id, // Usamos el id interno (UUID)
+        token, 
+        platform 
+      }, { onConflict: 'token' })
+      .select().single();
+      
+    if (error) throw error;
+    res.json({ ok: true, device: data });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || e });
+  }
+});
+
+// REMINDERS ENDPOINTS
+// Get all reminders for the authenticated user, optionally filtered by vehicleId
+app.get('/api/reminders', verifyToken, async (req, res) => {
+  const firebaseUid = req.user.uid;
+  const { vehicleId } = req.query; // Get vehicleId from query parameters
+
+  try {
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('firebase_uid', firebaseUid)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({ error: 'Usuario no encontrado en la base de datos.' });
+    }
+
+    let query = supabase
+      .from('reminders')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('due_date', { ascending: true });
+
+    if (vehicleId) {
+      query = query.eq('vehicle_id', vehicleId);
+    }
+
+    const { data, error } = await query;
+
+    if (error) throw error;
+    res.json({ ok: true, reminders: data });
+  } catch (e) {
+    console.error('[getReminders] Error:', e);
+    res.status(500).json({ error: e.message || e });
+  }
+});
+
+// Create a new reminder
+app.post('/api/reminders', verifyToken, async (req, res) => {
+  const firebaseUid = req.user.uid;
+  const { vehicle_id, title, notes, due_date, is_completed } = req.body;
+
+  try {
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('firebase_uid', firebaseUid)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({ error: 'Usuario no encontrado en la base de datos.' });
+    }
+
+    const { data, error } = await supabase
+      .from('reminders')
+      .insert({
+        user_id: user.id,
+        vehicle_id,
+        title,
+        notes,
+        due_date,
+        is_completed: is_completed ?? false,
+      })
+      .select().single();
+
+    if (error) throw error;
+    res.json({ ok: true, reminder: data });
+  } catch (e) {
+    console.error('[createReminder] Error:', e);
+    res.status(500).json({ error: e.message || e });
+  }
+});
+
+// Update a reminder
+app.put('/api/reminders/:id', verifyToken, async (req, res) => {
+  const firebaseUid = req.user.uid;
+  const { id } = req.params;
+  const { vehicle_id, title, notes, due_date, is_completed } = req.body;
+
+  try {
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('firebase_uid', firebaseUid)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({ error: 'Usuario no encontrado en la base de datos.' });
+    }
+
+    const { data, error } = await supabase
+      .from('reminders')
+      .update({
+        vehicle_id,
+        title,
+        notes,
+        due_date,
+        is_completed,
+      })
+      .eq('id', id)
+      .eq('user_id', user.id) // Ensure user can only update their own reminders
+      .select().single();
+
+    if (error) throw error;
+    res.json({ ok: true, reminder: data });
+  } catch (e) {
+    console.error('[updateReminder] Error:', e);
+    res.status(500).json({ error: e.message || e });
+  }
+});
+
+// Delete a reminder
+app.delete('/api/reminders/:id', verifyToken, async (req, res) => {
+  const firebaseUid = req.user.uid;
+  const { id } = req.params;
+
+  try {
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('firebase_uid', firebaseUid)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({ error: 'Usuario no encontrado en la base de datos.' });
+    }
+
+    const { error } = await supabase
+      .from('reminders')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', user.id); // Ensure user can only delete their own reminders
+
+    if (error) throw error;
+    res.json({ ok: true, message: 'Reminder deleted successfully.' });
+  } catch (e) {
+    console.error('[deleteReminder] Error:', e);
+    res.status(500).json({ error: e.message || e });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Automate backend listening on port ${PORT}`);
 });

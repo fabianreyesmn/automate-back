@@ -7,6 +7,7 @@ const multer = require('multer');
 const admin = require('firebase-admin');
 const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');
+const axios = require('axios');
 
 const app = express();
 app.use(cors());
@@ -430,6 +431,59 @@ app.delete('/api/reminders/:id', verifyToken, async (req, res) => {
   } catch (e) {
     console.error('[deleteReminder] Error:', e);
     res.status(500).json({ error: e.message || e });
+  }
+});
+
+// Pre-trip report
+app.get('/api/pre-trip-report', verifyToken, async (req, res) => {
+  const { from_lat, from_lon, to_lat, to_lon } = req.query;
+
+  if (!from_lat || !from_lon || !to_lat || !to_lon) {
+    return res.status(400).json({ error: 'Se requieren las coordenadas de origen y destino (from_lat, from_lon, to_lat, to_lon).' });
+  }
+
+  const OWM_API_KEY = process.env.OPENWEATHERMAP_API_KEY;
+  if (!OWM_API_KEY) {
+    console.error('[pre-trip] Falta OPENWEATHERMAP_API_KEY');
+    return res.status(500).json({ error: 'El servidor no está configurado para reportes de clima.' });
+  }
+
+  try {
+    // 1. Obtener datos de la ruta desde OSRM
+    const osrmUrl = `http://router.project-osrm.org/route/v1/driving/${from_lon},${from_lat};${to_lon},${to_lat}?overview=false`;
+    const routeResponse = await axios.get(osrmUrl);
+    const route = routeResponse.data.routes[0];
+    const durationMinutes = Math.round(route.duration / 60);
+    const distanceKm = (route.distance / 1000).toFixed(1);
+
+    // 2. Obtener datos del clima desde OpenWeatherMap
+    const weatherUrl = `https://api.openweathermap.org/data/2.5/weather?lat=${to_lat}&lon=${to_lon}&appid=${OWM_API_KEY}&units=metric&lang=es`;
+    const weatherResponse = await axios.get(weatherUrl);
+    const weather = weatherResponse.data;
+    const weatherDescription = weather.weather[0].description;
+    const temp = weather.main.temp.toFixed(1);
+    const feelsLike = weather.main.feels_like.toFixed(1);
+
+    // 3. Construir el reporte
+    const report = `
+Resumen del Viaje:
+- Distancia: ${distanceKm} km
+- Duración estimada: ${durationMinutes} minutos (sin tráfico)
+
+Clima en el destino:
+- Pronóstico: ${weatherDescription}
+- Temperatura: ${temp}°C
+- Sensación térmica: ${feelsLike}°C
+    `.trim();
+
+    res.json({ ok: true, report });
+
+  } catch (e) {
+    console.error('[pre-trip] Error al generar el reporte:', e.message);
+    if (e.response) {
+      console.error('Error details:', e.response.data);
+    }
+    res.status(500).json({ error: 'No se pudo generar el reporte.' });
   }
 });
 

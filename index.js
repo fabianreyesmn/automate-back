@@ -323,6 +323,9 @@ app.get('/api/reminders', verifyToken, async (req, res) => {
     const { data, error } = await query;
 
     if (error) throw error;
+    
+    console.log(`[getReminders] Fetched ${data.length} reminders for user ${user.id}`);
+
     res.json({ ok: true, reminders: data });
   } catch (e) {
     console.error('[getReminders] Error:', e);
